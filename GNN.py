@@ -1,131 +1,115 @@
 import json
 import os
-import torch
 
 import numpy as np
-import torchvision
 import matplotlib.pyplot as plt
-import random
-import time
-import cv2
-
-from time import sleep
-
-import torchvision.transforms
 
 from modules import forward, calculateGradients, magnitude, \
-    g, initialize, sigmoidPrime, \
-    reluPrime, sigmoid, relu
-from tqdm import tqdm
+    initialize, sigmoidPrime, reluPrime, sigmoid, relu, tanhPrime, tanh, cos, sin, mse, msePrime, crossEntropy, \
+    crossEntropyPrime, absPrime, absFunc
 
 
 class Network:
     def __init__(self,
-                 train: bool = True, bias: float = 1, decay: float = 0.1,
-                 etaW: float = 1e-3, etaR: float = 1e-3, etaP: float = 1e-3,
-                 minRadius: int = 10, maxRadius: int = 20, frequency: int = 5,
-                 nInputs: int = 784, nHiddens: int = 10, nOutputs: int = 10,  # NOQA
-                 trainingDataset: list = None, evaluatingDataset: list = None, epochs: int = 10,
-                 datasetCap: int = 1000, width: int = 20, height: int = 20, depth: int = 20,
+                 train: bool = True, minBias: float = 0.4, maxBias: float = 0.8,
+                 decay: float = 0.1, etaW: float = 1e-3, etaR: float = 1e-3,
+                 etaP: float = 1e-3, etaB: float = 1e-3, minRadius: int = 10,
+                 maxRadius: int = 20, frequency: int = 5, nInputs: int = 784,
+                 nHiddens: int = 10, nOutputs: int = 10,  # NOQA
+                 epochs: int = 10, datasetCap: int = 1000,
+                 width: int = 20, height: int = 20, depth: int = 20,
                  hiddenZoneOffset: int = 400, outputZoneOffset: int = 400,
                  maxInputPerNode: int = 2, minInputPerNode: int = 1,
                  maxOutputPerNode: int = 20, minOutputPerNode: int = 1,
-                 save: bool = True, datasetName: str = 'MNIST', configFilePath: str = '',
-                 activationFunc: str = 'sigmoid', lossFunc: str = 'cross_entropy'):  # NOQA
-        self.lossPerEpoch = []
+                 datasetName: str = 'mnist', activationFunc: str = 'sigmoid',
+                 lossFunc: str = 'mse'):  # NOQA
+        assert lossFunc != '' and activationFunc != '', 'Please specify which type of loss function ' \
+                                                        '/ activation function to use.'
+        if train:
+            self.losses = []
 
-        self.fPrime = None
-        self.f = None
+            self.fPrime = None
+            self.f = None
 
-        self.activationFunc = activationFunc
-        self.lossFunc = lossFunc
+            self.gPrime = None
+            self.g = None
 
-        self.hiddenZoneOffset = hiddenZoneOffset
-        self.outputZoneOffset = outputZoneOffset
+            self.activationFunc = activationFunc
+            self.lossFunc = lossFunc
 
-        self.nInputs = nInputs
-        self.nHiddens = nHiddens  # NOQA
-        self.nOutputs = nOutputs
-        self.N = nInputs + nHiddens + nOutputs  # Number of Nodes
+            self.hiddenZoneOffset = hiddenZoneOffset
+            self.outputZoneOffset = outputZoneOffset
 
-        self.maxInputPerNode = maxInputPerNode
-        self.minInputPerNode = minInputPerNode
+            self.nInputs = nInputs
+            self.nHiddens = nHiddens  # NOQA
+            self.nOutputs = nOutputs
+            self.N = nInputs + nHiddens + nOutputs  # Number of Nodes
 
-        self.maxOutputPerNode = maxOutputPerNode
-        self.minOutputPerNode = minOutputPerNode
+            self.maxInputPerNode = maxInputPerNode
+            self.minInputPerNode = minInputPerNode
 
-        self.etaW = etaW
-        self.etaR = etaR
-        self.etaP = etaP
+            self.maxOutputPerNode = maxOutputPerNode
+            self.minOutputPerNode = minOutputPerNode
 
-        self.bias = bias
-        self.decay = decay
+            self.etaW = etaW
+            self.etaB = etaB
+            self.etaR = etaR
+            self.etaP = etaP
 
-        self.width = width
-        self.depth = depth
-        self.height = height
+            self.minBias = minBias
+            self.maxBias = maxBias
+            self.decay = decay
 
-        self.minRadius = minRadius
-        self.maxRadius = maxRadius
+            self.width = width
+            self.depth = depth
+            self.height = height
 
-        self.epochs = epochs
-        self.frequency = frequency
+            self.minRadius = minRadius
+            self.maxRadius = maxRadius
 
-        self.datasetCap = datasetCap
-        self.datasetName = datasetName
-        self.trainingDataset = trainingDataset
-        self.evaluatingDataset = evaluatingDataset
+            self.epochs = epochs
+            self.frequency = frequency
 
-        self.confusionMatrix = np.zeros((self.nOutputs, self.nOutputs), dtype=np.float64)
+            self.datasetCap = datasetCap
+            self.datasetName = datasetName
 
-        self.lossWRTHiddenOutput = np.zeros((self.N,), dtype=np.float64)
+            self.numberOfTrainableParams = 0
+            self.numberOfUsableParams = 0
+
+            self.createMatrices()
+            self.construct_network()
+
+            self.getLossFunction()
+            self.getActivationFunction()
+
+    def createMatrices(self):
         self.W = np.zeros((self.N, self.N),
-                          dtype=np.float64)  # Use to store size of every node in the network
+                          dtype=np.float64)  # Use to store size of every node in the self
         self.P = np.zeros((self.N, 3),
-                          dtype=np.float64)  # Use to store position (x, y) of node in the network
+                          dtype=np.float64)  # Use to store position (x, y) of node in the self
+        self.B = np.random.uniform(-self.minBias, -self.maxBias, self.N)
 
         self.R = np.zeros((self.N, 1),
-                          dtype=np.float64)  # Use to store size of every node in the network
-        self.I = np.zeros((self.N, self.N), dtype=np.float64)
-        self.O = np.zeros((self.N, self.N), dtype=np.float64)
+                          dtype=np.float64)  # Use to store AoE of every node in the self
+        self.I = np.zeros((self.N,), dtype=np.float64)
+        self.O = np.zeros((self.N,), dtype=np.float64)
 
+        self.gradB = np.zeros((self.N,), dtype=np.float64)
         self.gradU = np.zeros((self.N, self.N),
                               dtype=np.float64)  # Gradient U use to update W
         self.gradR = np.zeros((self.N, 1),
                               dtype=np.float64)  # Gradient S use to update the size of each node
         self.gradP = np.zeros((self.N, 3),
                               dtype=np.float64)  # Gradient P use to update position of each node
+        self.lossWRTHiddenOutput = np.zeros((self.N,), dtype=np.float64)
 
-        self.inputIdc = np.array([i for i in range(nInputs)], dtype=np.int64).reshape((self.nInputs,))
-        self.hiddenIdc = np.array([i + nInputs for i in range(nHiddens)], dtype=np.int64).reshape(
+        self.inputIdc = np.array([i for i in range(self.nInputs)], dtype=np.int64).reshape((self.nInputs,))
+        self.hiddenIdc = np.array([i + self.nInputs for i in range(self.nHiddens)], dtype=np.int64).reshape(
             (self.nHiddens,))  # NOQA
-        self.outputIdc = np.array([i + nInputs + nHiddens for i in range(nOutputs)], dtype=np.int64).reshape(
+        self.outputIdc = np.array([i + self.nInputs + self.nHiddens for i in range(self.nOutputs)],
+                                  dtype=np.int64).reshape(
             (self.nOutputs,))
         self.nodeIdc = np.concatenate([self.inputIdc, self.hiddenIdc, self.outputIdc], axis=0)
-
-        self.numberOfTrainableParams = 0
-        self.numberOfUsableParams = 0
-
-        if train:
-            self.simulationIdx = 0
-            while True:
-                try:
-                    self.filename = f'3d_nodes_simulation_{self.simulationIdx}'
-                    self.dirName = f'records/{self.filename}'
-                    self.wFolders = f'{self.dirName}/w_graphs'
-
-                    os.mkdir(f'./{self.dirName}')
-                    os.mkdir(f'./{self.wFolders}')
-                    break
-
-                except FileExistsError:
-                    self.simulationIdx += 1
-            print(f'Using file\'s name: {self.filename}')
-
-            self.save = save
-            self.configFilePath = configFilePath
-
-            self.construct_network()
 
     def plot(self):
         fig = plt.figure()
@@ -148,7 +132,7 @@ class Network:
         ax.set_zlabel('Z Label')
         plt.show()
 
-    def save_config(self, trainingTime, accuracy):
+    def save_config(self, trainingTime, accuracy, simulationFolderPath):
         configs = {
             'nInputs': self.nInputs,
             'nHiddens': self.nHiddens,  # NOQA
@@ -161,13 +145,14 @@ class Network:
             'etaW': self.etaW,
             'etaR': self.etaR,
             'etaP': self.etaP,
-            'bias': self.bias,
             'decay': self.decay,
             'width': self.width,
             'depth': self.depth,
             'height': self.height,
             'minRadius': self.minRadius,
             'maxRadius': self.maxRadius,
+            'minBias': self.minBias,
+            'maxBias': self.maxBias,
             'epochs': self.epochs,
             'hiddenZoneOffset': self.hiddenZoneOffset,
             'outputZoneOffset': self.outputZoneOffset,
@@ -178,51 +163,38 @@ class Network:
             'dataset': self.datasetName,
             'activationFunc': self.activationFunc,
             'trainingTime': trainingTime,
-            'losses': self.lossPerEpoch,
+            'losses': self.losses,
             'accuracy': accuracy
         }
 
-        with open(f'./{self.dirName}/configs.json', 'w') as f:
+        with open(f'./{simulationFolderPath}/configs.json', 'w') as f:
             json.dump(configs, f, indent=4)
 
-    def save_result(self):
-        with open(f'./{self.dirName}/w.npy', 'wb') as fW:
-            np.save(fW, self.W)
+    def save_result(self, simulationFolderPath):
+        np.save(f'./{simulationFolderPath}/w.npy', self.W)
+        np.save(f'./{simulationFolderPath}/b.npy', self.B)
+        np.save(f'./{simulationFolderPath}/r.npy', self.R)
+        np.save(f'./{simulationFolderPath}/p.npy', self.P)
 
-        with open(f'./{self.dirName}/r.npy', 'wb') as fR:
-            np.save(fR, self.R)
+    def load_config(self, modelFolderPath):
+        assert os.path.exists(f'./{modelFolderPath}/configs.json'), \
+            f'./{modelFolderPath}/configs.json cannot be found'
 
-        with open(f'./{self.dirName}/p.npy', 'wb') as fP:
-            np.save(fP, self.P)
-
-        with open(f'./{self.dirName}/confusion_matrix.npy', 'wb') as fCM:
-            np.save(fCM, self.confusionMatrix)
-
-    def load_config(self):
-        assert os.path.exists(f'./{self.configFilePath}'), f'./{self.configFilePath} cannot be found'
-        with open(f'./{self.configFilePath}', 'r') as f:
+        with open(f'./{modelFolderPath}/configs.json', 'r') as f:
             for key, value in json.load(f).items():
                 setattr(self, key, value)
 
     def load_simulation(self, fp):
         print(f'Load Simulation From {fp}')
         assert os.path.exists(f'./{fp}'), f'./{fp} cannot be found'
+        self.load_config(f'./{fp}')
+        self.createMatrices()
 
         print('Load Matrices')
-        with open(f'./{fp}/w.npy', 'rb') as fW:
-            self.W = np.load(fW)
-
-        with open(f'./{fp}/r.npy', 'rb') as fR:
-            self.R = np.load(fR)
-
-        with open(f'./{fp}/p.npy', 'rb') as fP:
-            self.P = np.load(fP)
-
-        with open(f'./{fp}/confusion_matrix.npy', 'rb') as fCM:
-            self.confusionMatrix = np.load(fCM)
-
-        self.configFilePath = f'./{fp}/configs.json'
-        self.load_config()
+        self.W = np.load(f'./{fp}/w.npy')
+        self.B = np.load(f'./{fp}/b.npy')
+        self.R = np.load(f'./{fp}/r.npy')
+        self.P = np.load(f'./{fp}/p.npy')
 
     def isOverlap(self, idx, v, zone: str = 'i'):
         assert self.outputZoneOffset > 0 and self.hiddenZoneOffset > 0
@@ -291,17 +263,29 @@ class Network:
             self.P[nodeIdx] = self.getNodePosition(nodeIdx, zone='o')
 
         print('Initialize Weighted Matrix')
-        self.W, _ = initialize(np.random.randint(self.minInputPerNode, self.maxInputPerNode, 1)[0],
-                               np.random.randint(self.minOutputPerNode, self.maxOutputPerNode, 1)[0],
+        if self.minInputPerNode != self.maxInputPerNode and self.minOutputPerNode != self.maxOutputPerNode:
+            randomNumberOfInputConnection = np.random.randint(self.minInputPerNode, self.maxInputPerNode, 1)[0]
+            randomNumberOfOutputConnection = np.random.randint(self.minOutputPerNode, self.maxOutputPerNode, 1)[0]
+        else:
+            randomNumberOfInputConnection = self.maxInputPerNode
+            randomNumberOfOutputConnection = self.maxOutputPerNode
+
+        self.W, _ = initialize(randomNumberOfInputConnection,
+                               randomNumberOfOutputConnection,
                                self.N, self.nInputs, self.nOutputs,
                                self.inputIdc, self.hiddenIdc, self.outputIdc)
 
+        # self.W = fixSynapses(self.W, self.P, self.maxRadius, self.nodeIdc)
+
         print('\nInfo: ')
-        self.numberOfTrainableParams = len(np.where(self.W != 0)[0])
-        self.numberOfUsableParams = np.square(self.N) \
-                                    - self.N \
-                                    - self.nInputs * self.N \
-                                    - self.nOutputs * (self.N - self.nInputs)
+        self.numberOfTrainableParams = len(np.where(self.W != 0)[0]) \
+                                       + self.R.shape[0] \
+                                       + self.P.shape[0]
+
+        self.numberOfUsableParams = self.N ** 2 \
+                                    + self.R.shape[0] \
+                                    + self.P.shape[0]
+
         print(f'Params Usage: {(self.numberOfTrainableParams / self.numberOfUsableParams) * 100:.2f}%')
         print(f'Number of Trainable Parameters: {self.numberOfTrainableParams}')
         print(f'Number of Usable Parameters: {self.numberOfUsableParams}')
@@ -315,197 +299,82 @@ class Network:
             self.fPrime = reluPrime
             self.f = relu
 
-    def getPrecisionForEachClass(self):
-        precisionVector = np.zeros((self.nOutputs, 1))
-        for outputIdx in range(self.outputIdc.shape[0]):
-            precisionVector[outputIdx] = self.confusionMatrix[outputIdx, outputIdx] \
-                                         / np.sum(self.confusionMatrix[:, outputIdx])
+        elif self.activationFunc == 'tanh':
+            self.fPrime = tanhPrime
+            self.f = tanh
 
-        return precisionVector * 100.
+        elif self.activationFunc == 'sin':
+            self.fPrime = cos
+            self.f = sin
 
-    def train(self) -> None:
-        self.getActivationFunction()
-        sleep(1)
+    def getLossFunction(self):
+        if self.lossFunc == 'mse':
+            self.gPrime = msePrime
+            self.g = mse
 
-        for epoch in range(self.epochs):
-            etaW = np.copy(self.etaW)
-            etaP = np.copy(self.etaP)
-            etaR = np.copy(self.etaR)
-            loss = 0
+        elif self.lossFunc == 'ce':
+            self.gPrime = crossEntropyPrime
+            self.g = crossEntropy
 
+        elif self.lossFunc == 'abs':
+            self.gPrime = absPrime
+            self.g = absFunc
+
+    def zeros_io(self):
+        self.I *= 0
+        self.O *= 0
+
+    def zeros_grad(self):
+        self.gradU *= 0
+        self.gradB *= 0
+        self.gradR *= 0
+        self.gradP *= 0
+        self.lossWRTHiddenOutput *= 0
+
+    def update_params(self, v, etaW, etaB, etaP, etaR):
+        self.gradU, self.gradR, self.gradP = calculateGradients(
+            v, self.W, self.I,
+            self.O, self.P, self.R,
+            self.gradU, self.gradR, self.gradP, self.gradB,
+            self.nInputs, self.nHiddens, self.nOutputs,
+            self.hiddenIdc, self.outputIdc,
+            self.fPrime, self.gPrime, self.lossWRTHiddenOutput
+        )
+
+        self.W += -etaW * self.gradU
+        self.B += -etaB * self.gradB
+        self.P += -etaP * self.gradP
+        self.R += -etaR * self.gradR
+
+    def save_weight_image_per_epoch(self, epoch, simulationFolderPath):
+        if not os.path.exists(f'{simulationFolderPath}/graphs'):
+            os.mkdir(f'{simulationFolderPath}/graphs')
+            os.mkdir(f'{simulationFolderPath}/graphs/W')
+
+        if (epoch + 1) % self.frequency == 0:
             WForPlot = self.W.copy()
             WForPlot = np.abs(WForPlot)
-            plt.imsave(f'./{self.wFolders}/w{epoch}.jpg',
-                       WForPlot[:, nInputs: nInputs + nHiddens].T
-                       , cmap='hot')
 
-            if (epoch + 1) % self.frequency == 0:
-                etaW *= self.decay
-                etaP *= self.decay
-                etaR *= self.decay
+            try:
+                plt.imsave(f'./{simulationFolderPath}/graphs/W/w{epoch}.jpg',
+                           WForPlot[:, self.nInputs: self.nInputs + self.nHiddens].T
+                           , cmap='hot')
+            except Exception:
+                plt.imsave(f'./{simulationFolderPath}/graphs/W/w{epoch}.jpg',
+                           WForPlot, cmap='hot')
 
-            for u, v in tqdm(self.trainingDataset[:self.datasetCap],
-                             desc=f'Number of trainable parameters: {self.numberOfTrainableParams:<5}, '
-                                  f'Number of usable parameters: {self.numberOfUsableParams:<5}, '
-                                  f'Epoch: {epoch + 1:<2} / {self.epochs:<2}',
-                             colour='green',
-                             leave=False,
-                             total=self.datasetCap):
-                self.I.fill(0)
-                self.O.fill(0)
+    def record_output_of_hidden_neurons(self, simulationFolderPath, label):
+        if not os.path.exists(f'{simulationFolderPath}/graphs/O'):
+            os.mkdir(f'{simulationFolderPath}/graphs/O')
 
-                self.I, self.O = forward(self.W, self.I, self.O, self.P, self.R,
-                                         self.nodeIdc, self.inputIdc,
-                                         self.hiddenIdc, self.outputIdc,
-                                         u, self.bias, self.f)
-                predict = np.diag(self.O)[min(self.outputIdc):].reshape((self.nOutputs,))
-
-                self.gradU.fill(0)
-                self.gradR.fill(0)
-                self.gradP.fill(0)
-                self.lossWRTHiddenOutput.fill(0)
-
-                self.gradU, self.gradR, self.gradP = calculateGradients(predict, v, self.W, self.I,
-                                                                        self.O, self.P, self.R,
-                                                                        self.gradU, self.gradR, self.gradP,
-                                                                        self.nInputs, self.nHiddens, self.nOutputs,
-                                                                        self.hiddenIdc, self.outputIdc,
-                                                                        self.fPrime, self.lossWRTHiddenOutput)
-                self.W += -etaW * self.gradU
-                self.P += -etaP * self.gradP
-                self.R += -etaR * self.gradR
-                loss += g(predict, v, self.nOutputs)
-
-            self.lossPerEpoch.append(loss / self.datasetCap)
-
-    def evaluate(self):
-        self.getActivationFunction()
-
-        for u, v in tqdm(self.evaluatingDataset,
-                         desc=f'Number of trainable parameters: {self.numberOfTrainableParams:<5}, '
-                              f'Number of usable parameters: {self.numberOfUsableParams:<5}',
-                         colour='green',
-                         leave=False):
-            predict = np.argmax(self.predict(u))
-            target = np.argmax(v)
-
-            self.confusionMatrix[target, predict] += 1
-
-        return self.confusionMatrix
+        O = self.O.copy()
+        O = O[self.nInputs: self.nInputs + self.nHiddens] \
+            .reshape(self.nHiddens // 2, 2).T
+        plt.imsave(f'./{simulationFolderPath}/graphs/O/{label}.jpg', O)
 
     def predict(self, u):
-        self.getActivationFunction()
-        self.I.fill(0)
-        self.O.fill(0)
+        self.zeros_io()
+        self.I, self.O = forward(self.W, self.I, self.O, self.P, self.R, self.B,
+                                 self.inputIdc, self.hiddenIdc, self.outputIdc, u, self.f)
 
-        _, O = forward(self.W, self.I, self.O, self.P, self.R,
-                       self.nodeIdc, self.inputIdc,
-                       self.hiddenIdc, self.outputIdc,
-                       u, self.bias, self.f)
-        predict = np.diag(self.O)[min(self.outputIdc):].reshape((self.nOutputs,))
-
-        return predict
-
-
-if __name__ == '__main__':
-    nInputs = 28 * 28
-    nHiddens = 500  # NOQA
-    nOutputs = 10
-    N = nInputs + nHiddens + nOutputs
-
-    maxInputPerNode = nInputs + nHiddens
-    maxOutputPerNode = nOutputs + nHiddens
-
-    train = True
-    EPOCHS = 24
-    datasetCap = 8000
-    ratio = 1 / 2
-    record_no = 63
-
-    classPerTrainingDataset = np.zeros((nOutputs,), dtype=np.int64)
-    classPerTransformedTrainingDataset = np.zeros((nOutputs,), dtype=np.int64)
-    evaluatingDataset = []
-    trainingDataset = []
-    validationSet = []
-
-    if train:
-        trainingMNIST = torchvision.datasets.MNIST('./data', train=True, download=True)
-        evaluatingMNIST = torchvision.datasets.MNIST('./data', train=False)
-
-        # Preprocessing Training Data
-        for u, v in tqdm(trainingMNIST, desc='Preprocessing Training Data: ', colour='green'):
-            if classPerTrainingDataset[v] + 1 \
-                    <= datasetCap // nOutputs:
-                # Target output vector v
-                t = np.zeros((nOutputs,), dtype=np.float64)
-                t[v] = 1
-
-                if np.max(u) == 0.:
-                    continue
-
-                if classPerTransformedTrainingDataset[v] + 1 == 10:
-                    cv2.imwrite(f'./training_samples/{v}.jpg', np.array(u))
-
-                u = np.array(u) / np.max(u)
-                u[u != 0] = 1.
-
-                trainingDataset.append([(u).flatten(), t])
-                classPerTrainingDataset[v] += 1
-
-        # Preprocessing Evaluating Data
-        for u, v in tqdm(evaluatingMNIST, desc='Preprocessing Evaluating Data: ', colour='green'):
-            # Target output vector v
-            t = np.zeros((nOutputs,), dtype=np.float64)
-            t[v] = 1
-
-            u = np.array(u) / np.max(u)
-            u[u != 0] = 1.
-
-            evaluatingDataset.append([(u).flatten(), t])
-
-    for _ in range(100):
-        random.shuffle(trainingDataset)
-        random.shuffle(evaluatingDataset)
-
-    network = Network(
-        nInputs=nInputs, nHiddens=nHiddens, nOutputs=nOutputs,
-        trainingDataset=trainingDataset, evaluatingDataset=evaluatingDataset,
-        epochs=EPOCHS, datasetCap=datasetCap, frequency=6,
-        minRadius=500, maxRadius=800, save=True,
-        etaW=6e-2, etaP=6e-2, etaR=6e-2, decay=0.1,
-        width=8000, height=8000, depth=8000, bias=-0.5,
-        hiddenZoneOffset=3000, outputZoneOffset=500,
-        maxInputPerNode=maxInputPerNode, minInputPerNode=maxInputPerNode // 2,
-        maxOutputPerNode=maxOutputPerNode, minOutputPerNode=maxOutputPerNode // 2,
-        activationFunc='sigmoid', datasetName='MNIST', train=train
-    )
-
-    if train:
-        startTime = time.perf_counter()
-        network.train()
-        confusionMatrix = network.evaluate()
-        sumOfDiag = np.sum(np.diag(confusionMatrix))
-        accuracy = sumOfDiag * 100. / len(evaluatingDataset)
-        print(f'Accuracy: {accuracy}%')
-
-        totalTime = time.perf_counter() - startTime
-        print(f'Total Established Time: {totalTime} (sec)')
-        print(f'Precision:\n{network.getPrecisionForEachClass()}')
-
-        network.save_result()
-        network.save_config(trainingTime=totalTime,
-                            accuracy=accuracy)
-        network.plot()
-    else:
-        network.load_simulation(f'records/3d_nodes_simulation_{record_no}')
-
-        fp = './test1.jpg'
-        u = cv2.imread(fp)
-        u = cv2.cvtColor(u, cv2.COLOR_RGB2GRAY)
-
-        u = np.array(u) / np.max(u)
-        u = u.flatten()
-
-        print(f'Testing {fp}')
-        predict = network.predict(u)
-        print(f'Prediction: {np.argmax(predict)}')
+        return self.O[min(self.outputIdc):].reshape((self.nOutputs,))
